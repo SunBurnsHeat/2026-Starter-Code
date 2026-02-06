@@ -38,8 +38,10 @@ public class IntakeCommand extends Command{
                 
                 intakeSubsystem.setIntakePosition(targetPosition);
             }
-
             wasAtPosition = atPos;
+        }
+        else {
+            intakeSubsystem.setIntakePosition(targetPosition);
         }
     }
 
