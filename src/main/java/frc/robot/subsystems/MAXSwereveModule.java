@@ -21,7 +21,7 @@ import frc.robot.Configs;
 public class MAXSwereveModule {
 
     private final SparkFlex kDrivingFlex;
-    private final SparkMax kTurningMAX;
+    private final SparkFlex kTurningMAX;
 
     private final RelativeEncoder kDriveEncoder;
     private final AbsoluteEncoder kTurningEncoder;
@@ -33,7 +33,7 @@ public class MAXSwereveModule {
     private SwerveModuleState targetstate = new SwerveModuleState(0.0, new Rotation2d());
 
     public MAXSwereveModule(int turningCANid, int drivingCANid, double angleOffset) {
-        kTurningMAX = new SparkMax(turningCANid, MotorType.kBrushless);
+        kTurningMAX = new SparkFlex(turningCANid, MotorType.kBrushless);
         kDrivingFlex = new SparkFlex(drivingCANid, MotorType.kBrushless);
 
 

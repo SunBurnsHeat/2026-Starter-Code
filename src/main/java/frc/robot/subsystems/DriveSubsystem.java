@@ -1,14 +1,15 @@
 package frc.robot.subsystems;
 
+import org.photonvision.EstimatedRobotPose;
+
 import com.pathplanner.lib.auto.AutoBuilder;
-import com.pathplanner.lib.commands.PathfindingCommand;
 import com.pathplanner.lib.config.PIDConstants;
 import com.pathplanner.lib.config.RobotConfig;
 import com.pathplanner.lib.controllers.PPHolonomicDriveController;
-import com.pathplanner.lib.util.DriveFeedforwards;
 import com.studica.frc.AHRS;
 import com.studica.frc.AHRS.NavXComType;
 
+import edu.wpi.first.math.estimator.SwerveDrivePoseEstimator;
 import edu.wpi.first.math.filter.SlewRateLimiter;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
@@ -47,8 +48,12 @@ public class DriveSubsystem extends SubsystemBase {
 
     private final Field2d field = new Field2d();
 
+    private SwerveDrivePoseEstimator poseEstimator;
+    private final VisionSubsystem visionSubsystem;
+
     
-    public DriveSubsystem(){
+    public DriveSubsystem(VisionSubsystem visionSubsystem){
+        this.visionSubsystem = visionSubsystem;
 
     // // // Configure AutoBuilder last
     // AutoBuilder.configure(
@@ -72,6 +77,21 @@ public class DriveSubsystem extends SubsystemBase {
     //         this // Reference to this subsystem to set requirements
     // );
         setupPathPlanner();
+
+        // Initialize pose estimator with same kinematics and initial state
+        poseEstimator = new SwerveDrivePoseEstimator(
+            DriveConstants.kDriveKinematics,
+            getHeadingRotation2d(),
+            getModulePositions(),
+            new Pose2d()  // initial pose - will be reset in autos or as needed
+            // Optional: add state/vision std devs here for tuning later
+            // e.g., new MatBuilder<>(Nat.N3(), Nat.N1()).fill(0.02, 0.02, 0.02),
+            //      new MatBuilder<>(Nat.N3(), Nat.N1()).fill(0.5, 0.5, 0.5)
+        );
+
+        // For field visualization of both poses
+        field.getObject("Raw Odometry").setPose(new Pose2d());
+        
         SmartDashboard.putData("Field", field);
     }
     // movement variables
@@ -99,16 +119,45 @@ public class DriveSubsystem extends SubsystemBase {
 
     @Override
     public void periodic() {
-        // updates the odometry using the current values gyro and position
-        odometry.update(
-                Rotation2d.fromDegrees(-gyro.getAngle()),
-                new SwerveModulePosition[] {
-                        kFLeft.getPosition(),
-                        kFRight.getPosition(),
-                        kBLeft.getPosition(),
-                        kBRight.getPosition()
-                });
+        Rotation2d currentGyro = getHeadingRotation2d();
+        SwerveModulePosition[] currentPositions = getModulePositions();
 
+        // Update raw odometry (pure dead-reckoning, drifts over time)
+        odometry.update(currentGyro, currentPositions);
+
+        // Update pose estimator with same dead-reckoning base
+        poseEstimator.update(currentGyro, currentPositions);
+
+        // Provide current fused pose as reference for PhotonVision (helps reject wrong tags)
+        visionSubsystem.setReferencePose(poseEstimator.getEstimatedPosition());
+
+        // Vision fusion — only into the pose estimator
+        var visionEst = visionSubsystem.getEstimatedGlobalPose();
+        if (visionEst.isPresent()) {
+            EstimatedRobotPose est = visionEst.get();
+            Pose2d visionPose = est.estimatedPose.toPose2d();
+
+            // Quality checks (tune these thresholds as needed)
+            int numTags = est.targetsUsed.size();
+            double maxAmbiguity = 0.2;
+            boolean goodSingleTag = numTags == 1 && est.targetsUsed.get(0).getPoseAmbiguity() <= maxAmbiguity;
+            boolean goodMultiTag = numTags >= 2;
+
+            // Optional: reject huge jumps
+            if (visionPose.getTranslation().getDistance(poseEstimator.getEstimatedPosition().getTranslation()) > 3.0) {
+                // ignore outlier
+            } else if (goodMultiTag || goodSingleTag) {
+                poseEstimator.addVisionMeasurement(visionPose, est.timestampSeconds);
+            }
+        }
+
+        // Visualization & logging
+        field.setRobotPose(poseEstimator.getEstimatedPosition());           // main robot (vision-corrected)
+        field.getObject("Raw Odometry").setPose(odometry.getPoseMeters()); // secondary overlay
+
+        SmartDashboard.putString("Fused Pose (Vision)", poseEstimator.getEstimatedPosition().toString());
+        SmartDashboard.putString("Raw Odometry Pose", odometry.getPoseMeters().toString());
+        SmartDashboard.putNumber("Gyro Ang", getHeading());
 
         field.setRobotPose(this.getP());
         
@@ -116,21 +165,22 @@ public class DriveSubsystem extends SubsystemBase {
     }
 
     public Pose2d getP() {
+        // Primary pose used by PathPlanner, autos, etc. → fused with vision
+        return poseEstimator.getEstimatedPosition();
+    }
+
+    public Pose2d getRawOdometryPose() {
+        // New getter for pure dead-reckoning (no vision correction)
         return odometry.getPoseMeters();
     }
 
-
-
-    // resets the odometry by utilizing the current gyro angle and module positions
     public void resetOdometry(Pose2d pose) {
-        odometry.resetPosition(Rotation2d.fromDegrees(-gyro.getAngle()),
-                new SwerveModulePosition[] { 
-                    kFLeft.getPosition(),
-                    kFRight.getPosition(),
-                    kBLeft.getPosition(),
-                    kBRight.getPosition() 
-                    },
-                pose);
+        // Reset BOTH to the same pose
+        Rotation2d currentGyro = getHeadingRotation2d();
+        SwerveModulePosition[] currentPositions = getModulePositions();
+
+        odometry.resetPosition(currentGyro, currentPositions, pose);
+        poseEstimator.resetPosition(currentGyro, currentPositions, pose);
     }
 
     public void drive(double x, double y, double rotation, boolean fieldrelative, boolean ratelimit) {
